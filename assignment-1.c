@@ -96,20 +96,17 @@ void conv2d(
     int pW = W % kW;
     int pH = H % kH;
 
-    printf("pW: %d, pH: %d\n", pW, pH);
-
     float** padded_matrix = apply_padding(f, W, H, pW, pH);
-    printf("\nPadded Matrix:\n");
-    print_matrix(padded_matrix, W+pW, H+pH);
 
     free(f); // no longer required
 
     float** output_matrix = generate_random_matrix(W, H, 0);
+    float** temp_matrix = generate_random_matrix(kW, kH, 0); 
+
+    double start = omp_get_wtime();
 
     for (int i=0; i<W; i++) {
         for (int j=0; j<H; j++) {
-
-            float** temp_matrix = generate_random_matrix(kW, kH, 0); 
             
             for (int kh=0; kh<kH; kh++) {
                 for (int kw=0; kw<kW; kw++) {
@@ -118,23 +115,23 @@ void conv2d(
                 }
 
             }
-            print_matrix(temp_matrix, kW, kH);
 
             float dp_val = dot_product(temp_matrix, g, kW, kH, kW, kH);
             output_matrix[i][j] = dp_val;
 
         }
     }
-    printf("Final Output:\n");
-    print_matrix(output_matrix, W, H);
+    double end = omp_get_wtime();
+    printf("Final Output in %f:\n", end-start);
+    // print_matrix(output_matrix, W, H);
     free(output_matrix);
 
 }
 
 int main() {
     srand(time(NULL));
-    int W = 5;
-    int H = 5;
+    int W = 5000;
+    int H = 5000;
     int kW = 3;
     int kH = 3;
 
@@ -142,9 +139,6 @@ int main() {
 
     float** f = generate_random_matrix(W, H, 1);
     float** g = generate_random_matrix(kW, kH, 1);
-
-    print_matrix(f, W, H);
-    print_matrix(g, kW, kH);
 
     conv2d(f, H, W, g, kH, kW, output);
     return 0;
