@@ -73,6 +73,7 @@ float dot_product(float** A, float** B, int aW, int aH, int bW, int bH) {
         return 0.0;
     }
 
+    // #pragma omp collapse(2) reduction(+:sum)
     for (int i=0; i<aW; i++) {
         for (int j=0; j<aH; j++) {
             sum += A[i][j]*B[i][j]; // potential for reduction & collapse here... possibly depends on kernel size
@@ -93,8 +94,8 @@ void conv2d(
     // we need nW & nH output rows & cols, kernel may restrict output
     // nW % kW = width padding 
     // nH % kH = height padding
-    int pW = W % kW;
-    int pH = H % kH;
+    int pW = kW - 1;
+    int pH = kH - 1;
 
     float** padded_matrix = apply_padding(f, W, H, pW, pH);
 
@@ -104,23 +105,26 @@ void conv2d(
     float** temp_matrix = generate_random_matrix(kW, kH, 0); 
 
     double start = omp_get_wtime();
-
+    
+    #pragma omp parallel for //firstprivate(temp_matrix)
     for (int i=0; i<W; i++) {
         for (int j=0; j<H; j++) {
             
+            // #pragma omp collapse(2)
             for (int kh=0; kh<kH; kh++) {
                 for (int kw=0; kw<kW; kw++) {
                     temp_matrix[kw][kh] = padded_matrix[i+kw][j+kh];
-    
                 }
-
             }
-
+            // #pragma omp task 
+            {
             float dp_val = dot_product(temp_matrix, g, kW, kH, kW, kH);
             output_matrix[i][j] = dp_val;
+            }
 
         }
     }
+
     double end = omp_get_wtime();
     printf("Final Output in %f:\n", end-start);
     // print_matrix(output_matrix, W, H);
@@ -132,14 +136,14 @@ int main() {
     srand(time(NULL));
     int W = 5000;
     int H = 5000;
-    int kW = 3;
-    int kH = 3;
+    int kW = 5;
+    int kH = 5;
 
     float** output = malloc(0*sizeof(float *)); // TODO: what is this?
 
     float** f = generate_random_matrix(W, H, 1);
     float** g = generate_random_matrix(kW, kH, 1);
-
+    
     conv2d(f, H, W, g, kH, kW, output);
     return 0;
 }
