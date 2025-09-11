@@ -2,17 +2,139 @@
 #include <stdlib.h>
 #include <omp.h>
 #include <time.h>
+#include<string.h>
 
-float** generate_matrix_old(int m, int n, int is_random) {
+int write_matrix_to_file_text(const char *filename, const float *matrix, int W, int H) {
+    if (!filename || !matrix || W <= 0 || H <= 0) return -1;
+    FILE *f = fopen(filename, "w");
+    if (!f) return -2;
+    if (fprintf(f, "%d %d\n", W, H) < 0) {
+        fclose(f);
+        return -3;
+    }
+    long total = (long)W * (long)H;
+    for (long i = 0; i < total; ++i) {
+        if (fprintf(f, "%.9g%c", matrix[i], (i % H == H-1) ? '\n' : ' ') < 0) {
+            fclose(f);
+            return -4;
+        }
+    }
+    fclose(f);
+    return 0;
+}
+
+float **read_matrix_from_file_text(const char *filename, int *outW, int *outH) {
+    if (!filename || !outW || !outH) {
+        printf("DEBUG: NULL parameter passed\n");
+        return NULL;
+    }
+
+    FILE *f = fopen(filename, "r");
+    if (!f) {
+        printf("DEBUG: Failed to open file: %s\n", filename);
+        perror("fopen");
+        return NULL;
+    }
+
+    int W, H;
+    int scan_result = fscanf(f, "%d %d", &W, &H);
+    
+    if (scan_result != 2) {
+        printf("DEBUG: Failed to read dimensions (expected 2 values, got %d)\n", scan_result);
+        fclose(f);
+        return NULL;
+    }
+    if (W <= 0 || H <= 0) { 
+        printf("DEBUG: Invalid dimensions W=%d, H=%d\n", W, H);
+        fclose(f); 
+        return NULL; 
+    }
+
+    long total = (long)W * (long)H;
+    float *data = (float*) malloc(sizeof(float) * total);
+    if (!data) { 
+        printf("DEBUG: Failed to allocate memory for data\n");
+        fclose(f); 
+        return NULL; 
+    }
+
+    // Read all float values sequentially
+    for (long i = 0; i < total; ++i) {
+        if (fscanf(f, "%f", &data[i]) != 1) {
+            printf("DEBUG: Failed to read float at position %ld\n", i);
+            free(data);
+            fclose(f);
+            return NULL;
+        }
+        if (i < 5) { // Print first 5 values for debugging
+        }
+    }
+
+    // Create array of row pointers
+    float **rows = (float**) malloc(sizeof(float*) * W);
+    if (!rows) {
+        printf("DEBUG: Failed to allocate memory for row pointers\n");
+        free(data);
+        fclose(f);
+        return NULL;
+    }
+    
+    // Each row points into the contiguous data block
+    for (int r = 0; r < W; ++r) {
+        rows[r] = data + (long)r * H;
+    }
+
+    fclose(f);
+    *outW = W;
+    *outH = H;
+    return rows;
+}
+
+void free_matrix_2D(float **mat) {
+    if (!mat) return;
+    free(mat[0]); // free contiguous data block
+    free(mat);    // free row pointers
+}
+
+void parse_command_line(int argc, char **argv,
+                        int *W, int *H, int *kW, int *kH, int *is_random,
+                        const char **infile, const char **kinfile, const char **outfile) {
+    for (int i = 1; i < argc; ++i) {
+        if (strcmp(argv[i], "--help") == 0 || strcmp(argv[i], "-h") == 0) {
+            printf("Usage: %s [-W width] [-H height] [-kW kw] [-kH kh] [-r] [-i infile] [-ki kernelfile] [-o outfile]\n", argv[0]);
+            exit(0);
+        } else if (strcmp(argv[i], "-W") == 0 && i+1 < argc) {
+            *W = atoi(argv[++i]);
+        } else if (strcmp(argv[i], "-H") == 0 && i+1 < argc) {
+            *H = atoi(argv[++i]);
+        } else if (strcmp(argv[i], "-kW") == 0 && i+1 < argc) {
+            *kW = atoi(argv[++i]);
+        } else if (strcmp(argv[i], "-kH") == 0 && i+1 < argc) {
+            *kH = atoi(argv[++i]);
+        } else if (strcmp(argv[i], "-r") == 0) {
+            *is_random = 1;
+        } else if (strcmp(argv[i], "-i") == 0 && i+1 < argc) {
+            *infile = argv[++i];
+        } else if (strcmp(argv[i], "-ki") == 0 && i+1 < argc) {
+            *kinfile = argv[++i];
+        } else if (strcmp(argv[i], "-o") == 0 && i+1 < argc) {
+            *outfile = argv[++i];
+        } else {
+            fprintf(stderr, "Unknown or malformed argument: %s\n", argv[i]);
+            fprintf(stderr, "Use --help for usage.\n");
+            exit(1);
+        }
+    }
+}
+
+
+float** generate_matrix_2D_memory(int m, int n, int is_random) {
     srand(time(NULL));
 
     // cache line is 64 bytes 
     float **matrix = (float **)malloc(sizeof(float *) * m); // treat this array as one of int pointers
                                                             // Problems:
-                                                            // m pointers defined represtenting m contiguous blocks of memory
-                                                            // malloc sends to heap, so no guarantee rows stored together 
-                                                            // 64 / 4 = 16 floats per cache line: potentially redundant memory in cache
-    
+            
     for (int i=0; i<m; i++) {
         matrix[i] = malloc(sizeof(float) * n); 
     }
@@ -32,7 +154,7 @@ float** generate_matrix_old(int m, int n, int is_random) {
 
 }
 
-float* generate_random_matrix(int W, int H, int is_random) {
+float* generate_matrix_1D_memory(int W, int H, int is_random) {
     float* matrix = malloc(sizeof(float)*W*H);
  
     for (int i=0; i<W*H; i++) {
@@ -68,12 +190,16 @@ float* apply_padding(
     int p_top = pW/2; // # padded rows before first original row
     int p_left = pH/2; // # padded rows before first original col 
 
-    for (int i=0; i<aW; ++i) {
-        for (int j=0; j<aH; ++j) {
-            padded_matrix[(i+p_top)*newH+j+p_left] = A[i*aH+j];
-        }
+    // TODO evaluate
+    #pragma omp parallel   
+    {    
+        #pragma omp for collapse(2) schedule(static)
+        for (int i=0; i<aW; ++i) {
+            for (int j=0; j<aH; ++j) {
+                padded_matrix[(i+p_top)*newH+j+p_left] = A[i*aH+j];
+            }
         
-            
+    }            
     }
     return padded_matrix;
 }
@@ -107,24 +233,6 @@ float* flatten_matrix(float** A, int W, int H) {
     return flat_matrix;
 }
 
-float dot_product(float* A, float* B, int aW, int aH, int bW, int bH) {
-    // Apply the dot product to 2 equal matricies, outputting the sum of elements
-
-    float sum = 0.0;
-    if ((aW != bW) || (aH != bH)) {
-        printf("[ERROR]: Not 2 n*n matricies");
-        return 0.0;
-    }
-
-    #pragma omp collapse(2) reduction(+:sum)
-    for (int i=0; i<aW; i++) {
-        for (int j=0; j<aH; j++) {
-            sum += A[i*aW+j]*B[i*bW+j]; // potential for reduction & collapse here... possibly depends on kernel size
-        }
-    }
-    return sum;
-}
-
 void conv2d(
     float **f, // input feature map
     int H, // input height,
@@ -132,7 +240,7 @@ void conv2d(
     float **g, // input kernel
     int kH, // kernel height
     int kW, // kernel width
-    float **output
+    float *output
 ) { 
     // we need nW & nH output rows & cols, kernel may restrict output
     // nW % kW = width padding 
@@ -144,6 +252,7 @@ void conv2d(
     free(f); // no longer required
 
     float* flat_kernel = flatten_matrix(g, kW, kH);
+
     free(g);
 
     float* padded_matrix = apply_padding(flat_matrix, W, H, pW, pH);
@@ -152,50 +261,80 @@ void conv2d(
     // print_matrix(padded_matrix, W+pW, H+pH);
     
 
-    float* output_matrix = generate_random_matrix(W, H, 0);
-    float* temp_matrix = generate_random_matrix(kW, kH, 0); 
+    // float* output_matrix = flatten_matrix(*output, W, H);
 
     printf("Starting Convultion,\n");
     double start = omp_get_wtime();
     
-    #pragma omp parallel for //firstprivate(temp_matrix)
+    #pragma omp parallel
+    {
+    #pragma omp for collapse(2) schedule(static)
     for (int i=0; i<W; i++) {
         for (int j=0; j<H; j++) {
             
-            #pragma omp collapse(2)
-            for (int kh=0; kh<kH; kh++) {
-                for (int kw=0; kw<kW; kw++) {
-                    temp_matrix[(kh*kW)+kw] = padded_matrix[((i+kw)*H)+j+kh];
+            float score = 0.0;
+            #pragma omp collapse(2) schedule(static) 
+            for (int kw=0; kw<kW; kw++) {
+                for (int kh=0; kh<kH; kh++) {
+                    score += (padded_matrix[(i+kw)*(H+pH)+j+kh] * flat_kernel[kw*kH+kh]);
                 }
             }
-            // #pragma omp task 
-            {
-            float dp_val = dot_product(temp_matrix, flat_kernel, kW, kH, kW, kH);
-            output_matrix[i*H+j] = dp_val;
-            }
-
+            output[i*H+j] = score;
+    
         }
+    }
     }
 
     double end = omp_get_wtime();
-    printf("Final Output in %f:\n", end-start);
-    // print_matrix(output_matrix, W, H);
-    free(output_matrix);
+    printf("Final Output in: %fs\n", end-start);
 
+    free(flat_kernel);
+    free(padded_matrix);
 }
 
-int main() {
-    srand(time(NULL));
-    int W = 1000;
-    int H = 1000;
-    int kW = 500;
-    int kH = 500;
+int main(int argc, char **argv) {
+    printf("Size of float: %zu bytes\n", sizeof(float));  // Should print 4
+    int W = 1024, H = 1024, kW = 90, kH = 90, is_random = 1;
+    const char *infile = NULL, *kinfile = NULL, *outfile = NULL;
+
+    parse_command_line(argc, argv, &W, &H, &kW, &kH, &is_random, &infile, &kinfile, &outfile);
+
+    float **f1d = NULL;
+    if (infile) {
+        int rW, rH;
+        f1d = read_matrix_from_file_text(infile, &rW, &rH);
+        if (!f1d) { fprintf(stderr, "Failed to read matrix from %s\n", infile); return 1; }
+        /* override W,H so dims match the loaded file */
+        W = rW; H = rH;
+    } else {
+        f1d = generate_matrix_2D_memory(W, H, is_random);
+        if (!f1d) { fprintf(stderr, "Failed to allocate input matrix\n"); return 1; }
+    }
+
+    float **g1d = NULL;
+    if (kinfile) {
+        int rkW, rkH;
+        g1d = read_matrix_from_file_text(kinfile, &rkW, &rkH);
+        if (!g1d) { fprintf(stderr, "Failed to read kernel from %s\n", kinfile); free(f1d); return 1; }
+        /* override kernel dims */
+        kW = rkW; kH = rkH;
+    } else {
+        g1d = generate_matrix_2D_memory(kW, kH, is_random);
+        if (!g1d) { fprintf(stderr, "Failed to allocate kernel matrix\n"); free(f1d); return 1; }
+    }
+
+    float *output = generate_matrix_1D_memory(W, H, 0);
     
-    float** output = malloc(0*sizeof(float *)); // TODO: what is this?
+    /* call your conv2d -- using the parameter order in your posted code */
+    conv2d(f1d, H, W, g1d, kH, kW, output);
 
-    float** f = generate_matrix_old(W, H, 1);
-    float** g = generate_matrix_old(kW, kH, 1);
+    /* write output if requested */
+    if (outfile) {
+        if (write_matrix_to_file_text(outfile, output, W, H) != 0) {
+            fprintf(stderr, "Warning: failed to write output to %s\n", outfile);
+        }
+    }
 
-    conv2d(f, H, W, g, kH, kW, output);
+    free(output);
     return 0;
 }
