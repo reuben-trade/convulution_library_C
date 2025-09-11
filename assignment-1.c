@@ -185,7 +185,9 @@ float* apply_padding(
     float* padded_matrix = malloc(total*sizeof(float));
 
 
-    for (int i=0; i<total; i++) {padded_matrix[i] = 0.0;}
+    for (int i=0; i<total; i++) {
+        padded_matrix[i] = 0.0; // init vals to 0
+    }
 
     int p_top = pW/2; // # padded rows before first original row
     int p_left = pH/2; // # padded rows before first original col 
@@ -199,7 +201,7 @@ float* apply_padding(
                 padded_matrix[(i+p_top)*newH+j+p_left] = A[i*aH+j];
             }
         
-    }            
+        }            
     }
     return padded_matrix;
 }
@@ -233,6 +235,111 @@ float* flatten_matrix(float** A, int W, int H) {
     return flat_matrix;
 }
 
+double perform_convulution_sequntial(int W, int H, int kW, int kH, int pW, int pH, float* padded_matrix, float* flat_kernel, float* output) {
+
+        double start = omp_get_wtime();
+
+        for (int i=0; i<W; i++) {
+            for (int j=0; j<H; j++) {
+                
+                float score = 0.0; 
+
+                for (int kw=0; kw<kW; kw++) {
+                    for (int kh=0; kh<kH; kh++) {
+                        score += (padded_matrix[(i+kw)*(H+pH)+j+kh] * flat_kernel[kw*kH+kh]); //2 FLOPS (+&*)
+                    }
+                }
+                output[i*H+j] = score;        
+
+            }
+        }
+
+        double end = omp_get_wtime();
+        return end-start;
+}
+
+double perform_convulution_metrics(int num_threads, int W, int H, int kW, int kH, int pW, int pH, int* thread_iterations, int* thread_start_addresses, float* padded_matrix, float* flat_kernel, float* output, float* thread_times ) {
+
+    omp_set_num_threads(num_threads);
+
+    double start = omp_get_wtime();
+
+    #pragma omp parallel
+    {
+        int tid = omp_get_thread_num();
+        double tid_start = omp_get_wtime();
+        int is_first_iteration_i = 1;
+        int is_first_iteration_j = 1;
+
+        #pragma omp for collapse(2) schedule(static)
+        for (int i=0; i<W; i++) {
+            
+            for (int j=0; j<H; j++) {
+                
+                float score = 0.0; 
+                // thread_counts[tid*64] += 2*kW*kH; // total blocks of kW*kH
+                thread_iterations[tid*64]++;
+                if (is_first_iteration_j) {
+                    thread_start_addresses[tid*64] = (i*H)+j;
+                    is_first_iteration_j = 0;
+                    
+                }
+
+                for (int kw=0; kw<kW; kw++) {
+                    for (int kh=0; kh<kH; kh++) {
+                        score += (padded_matrix[(i+kw)*(H+pH)+j+kh] * flat_kernel[kw*kH+kh]); //2 FLOPS (+&*)
+                        // thread_counts[tid*64]+=2; // total FLOPS
+                    }
+                }
+                output[i*H+j] = score;        
+                // output[tid*64] = score; // Testing for False Sharing  
+
+            }
+        }
+        double tid_end = omp_get_wtime();
+        thread_times[tid*64] = tid_end-tid_start;
+    }
+    double end = omp_get_wtime();
+    return end-start;
+
+}
+
+
+float perform_convulution_performance(int num_threads, int W, int H, int kW, int kH, int pW, int pH, float* padded_matrix, float* flat_kernel, float* output) {
+
+    omp_set_num_threads(num_threads);
+
+    double start = omp_get_wtime();
+
+    #pragma omp parallel
+    {
+        int tid = omp_get_thread_num();
+        double tid_start = omp_get_wtime();
+        int is_first_iteration_i = 1;
+        int is_first_iteration_j = 1;
+
+        #pragma omp for collapse(2) schedule(static)
+        for (int i=0; i<W; i++) {
+            
+            for (int j=0; j<H; j++) {
+                
+                float score = 0.0; 
+
+                for (int kw=0; kw<kW; kw++) {
+                    for (int kh=0; kh<kH; kh++) {
+                        score += (padded_matrix[(i+kw)*(H+pH)+j+kh] * flat_kernel[kw*kH+kh]); //2 FLOPS (+&*)
+                    }
+                }
+                output[i*H+j] = score;        
+            }
+        }
+    }
+    double end = omp_get_wtime();
+    return end-start;
+
+}
+
+
 void conv2d(
     float **f, // input feature map
     int H, // input height,
@@ -260,40 +367,78 @@ void conv2d(
 
     // print_matrix(padded_matrix, W+pW, H+pH);
     
-
     // float* output_matrix = flatten_matrix(*output, W, H);
 
-    printf("Starting Convultion,\n");
-    double start = omp_get_wtime();
+    // Simple per-thread counters
+    int max_threads = omp_get_max_threads();
+
+    // int* thread_counts = calloc(max_threads*64, sizeof(int)); // store each int on diff cacheline
+    float* thread_times = calloc(max_threads*64, sizeof(float)); // store each float on diff cacheline
+    int* thread_iterations = calloc(max_threads*64, sizeof(int));
+    int* thread_start_addresses = calloc(max_threads*64, sizeof(int));
+
+
+    printf("Starting Sequential Convultion\n");    
+    double sequential_time = perform_convulution_sequntial(W, H, kW, kH, pW, pH, padded_matrix, flat_kernel, output);
     
-    #pragma omp parallel
-    {
-    #pragma omp for collapse(2) schedule(static)
-    for (int i=0; i<W; i++) {
-        for (int j=0; j<H; j++) {
-            
-            float score = 0.0;
-            #pragma omp collapse(2) schedule(static) 
-            for (int kw=0; kw<kW; kw++) {
-                for (int kh=0; kh<kH; kh++) {
-                    score += (padded_matrix[(i+kw)*(H+pH)+j+kh] * flat_kernel[kw*kH+kh]);
-                }
-            }
-            output[i*H+j] = score;
+    printf("Starting Parallel Convultion (performance)\n");
+    double parallel_performance_time = perform_convulution_performance(max_threads, W, H, kW, kH, pW, pH, padded_matrix, flat_kernel, output);
     
-        }
-    }
+    printf("Starting Parallel Convultion (metrics)\n");
+    double parallel_performance_with_metrics = perform_convulution_metrics(max_threads, W, H, kW, kH, pW, pH, thread_iterations, thread_start_addresses, padded_matrix, flat_kernel, output, thread_times);
+
+    double parallel_overhead = parallel_performance_time - (sequential_time/max_threads);
+    double metric_overhead = parallel_performance_time - parallel_performance_with_metrics;
+
+    printf("**Results**\n");
+    printf("Sequential Time: %fs\n", sequential_time);
+    printf("Parallel Time (Performance): %f\n", parallel_performance_time);
+    printf("Parallel Time (with metric calculations): %f\n", parallel_overhead);
+    printf("\nParallel Overhead (not considering variance): %f\n", parallel_overhead); // TODO: calculate average overhead
+    printf("Metric Overhead (not considering variance): %f\n", metric_overhead); // TODO: calculate average overhead
+
+
+
+    // Metrics
+    printf("Assessed Metrics:\n");
+
+    // Print Iterations
+    printf("\nThread Total Iterations distribution:\n");
+    for (int t = 0; t < max_threads; t++) {
+        printf("Thread %d: %d Total Iterations\n", t, (thread_iterations[t*64]));
     }
 
-    double end = omp_get_wtime();
-    printf("Final Output in: %fs\n", end-start);
+    // Print Thread Starting Points
+    printf("\nThread Ending Locations:\n");
+    for (int t = 0; t < max_threads; t++) {
+        printf("Thread %d: Start Location: %d, End Location: %d\n", t, thread_start_addresses[t*64], thread_start_addresses[t*64]+thread_iterations[t*64]);
+    }
+
+    // Print thread time distribution
+    printf("\nThread time distribution:\n");
+    for (int t = 0; t < max_threads; t++) {
+        printf("Thread %d: %f seconds\n", t, thread_times[t*64]);
+    }
+
+    // Print Per Thread FLOPS
+    double total_ops = 0;
+    printf("\nThread FLOPS distribution:\n");
+    for (int t = 0; t < max_threads; t++) {
+        int thread_ops = thread_iterations[t*64]*2*kW*kH;
+        printf("Thread %d: %f FLOPS\n", t, (thread_ops/thread_times[t*64]));
+        total_ops += thread_ops;
+    }
+    // Print Total FLOPS
+    printf("Total Flops: %f\n", total_ops/parallel_performance_with_metrics);
 
     free(flat_kernel);
     free(padded_matrix);
+    free(thread_times);
+    free(thread_start_addresses);
+    free(thread_iterations);
 }
 
 int main(int argc, char **argv) {
-    printf("Size of float: %zu bytes\n", sizeof(float));  // Should print 4
     int W = 1024, H = 1024, kW = 90, kH = 90, is_random = 1;
     const char *infile = NULL, *kinfile = NULL, *outfile = NULL;
 
@@ -325,8 +470,11 @@ int main(int argc, char **argv) {
 
     float *output = generate_matrix_1D_memory(W, H, 0);
     
-    /* call your conv2d -- using the parameter order in your posted code */
     conv2d(f1d, H, W, g1d, kH, kW, output);
+
+
+
+    //
 
     /* write output if requested */
     if (outfile) {
