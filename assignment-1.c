@@ -4,6 +4,10 @@
 #include <time.h>
 #include<string.h>
 
+// Function Declarations
+double perform_convulution_metrics(int num_threads, int W, int H, int kW, int kH, int pW, int pH, int* thread_iterations, int* thread_start_index, float* padded_matrix, float* flat_kernel, float* output, float* thread_times);
+double get_parallel_metrics_per_thread(int max_threads, int W, int H, int kW, int kH, int pW, int pH, float* padded_matrix, float* flat_kernel, float* output);
+
 int write_matrix_to_file_text(const char *filename, const float *matrix, int W, int H) {
     if (!filename || !matrix || W <= 0 || H <= 0) return -1;
     FILE *f = fopen(filename, "w");
@@ -233,10 +237,11 @@ void print_matrix(float* A, int W, int H) {
     }
 }
 
-void write_results(int num_threads, int kW, int kH, double total_time, int* thread_start_index, int* thread_iterations, float* thread_times) {
+void write_metrics(int thread_num, int kW, int kH, double total_time, int* thread_start_index, int* thread_iterations, float* thread_times) {
+    /* Method to write parallel metrics to output file */
     FILE* fptr;
     char filename[256];  // Buffer for filename
-    snprintf(filename, sizeof(filename), "performance_metrics_%d_threads.txt", num_threads);
+    snprintf(filename, sizeof(filename), "performance_metrics_%d_threads.txt", thread_num);
     fptr = fopen(filename, "a");  // Append to file
 
     // Metrics
@@ -244,20 +249,20 @@ void write_results(int num_threads, int kW, int kH, double total_time, int* thre
 
     // Print Iterations
     fprintf(fptr, "\nThread Total Iterations distribution:\n");
-    for (int t = 0; t < num_threads; t++) {
+    for (int t = 0; t < thread_num; t++) {
         fprintf(fptr, "Thread %d: %d Total Iterations\n", t, (thread_iterations[t*64]));
     }
 
 
     // Print Thread Starting Points
     fprintf(fptr, "\nThread Ending Locations:\n");
-    for (int t = 0; t < num_threads; t++) {
+    for (int t = 0; t < thread_num; t++) {
         fprintf(fptr, "Thread %d: Start Location: %d, End Location: %d\n", t, thread_start_index[t*64], thread_start_index[t*64]+thread_iterations[t*64]);
     }
 
     // Print thread time distribution
     fprintf(fptr, "\nThread time distribution:\n");
-    for (int t = 0; t < num_threads; t++) {
+    for (int t = 0; t < thread_num; t++) {
         fprintf(fptr, "Thread %d: %f seconds\n", t, thread_times[t*64]);
     }
 
@@ -265,7 +270,7 @@ void write_results(int num_threads, int kW, int kH, double total_time, int* thre
     // Print Per Thread FLOPS
     double total_ops = 0;
     printf("\nThread FLOPS distribution:\n");
-    for (int t = 0; t < num_threads; t++) {
+    for (int t = 0; t < thread_num; t++) {
         int thread_ops = thread_iterations[t*64]*2*kW*kH;
         fprintf(fptr, "Thread %d: %f FLOPS\n", t, (thread_ops/thread_times[t*64]));
         total_ops += thread_ops;
@@ -273,6 +278,33 @@ void write_results(int num_threads, int kW, int kH, double total_time, int* thre
     // Print Total FLOPS    
     fprintf(fptr, "Total FLOPS: %f\n", total_ops/total_time);
 
+}
+
+double get_parallel_metrics_per_thread(int max_threads, int W, int H, int kW, int kH, int pW, int pH, float* padded_matrix, float* flat_kernel, float* output) {    
+    
+    double best_performance = 0.0;
+    int best_threads = 0;
+
+    for (int i=2; i<=max_threads/2; i=i+2) {
+        printf("Performing Function for %d threads\n", i);
+
+        float* thread_times = calloc(max_threads*64, sizeof(float)); 
+        int* thread_iterations = calloc(max_threads*64, sizeof(int));
+        int* thread_start_index = calloc(max_threads*64, sizeof(int));
+
+        double parallel_performance_with_metrics = perform_convulution_metrics(i, W, H, kW, kH, pW, pH, thread_iterations, thread_start_index, padded_matrix, flat_kernel, output, thread_times);
+        if (best_performance < parallel_performance_with_metrics) {
+            best_performance = parallel_performance_with_metrics;
+            best_threads = i;
+        }
+
+        write_metrics(i, kW, kH, parallel_performance_with_metrics, thread_start_index, thread_iterations, thread_times);
+        free(thread_times);
+        free(thread_iterations);
+        free(thread_start_index);
+    }
+
+    return best_performance;
 }
 
 float* flatten_matrix(float** A, int W, int H) {
@@ -517,17 +549,18 @@ void conv2d(
     double parallel_performance_time = perform_convulution_performance(max_threads, W, H, kW, kH, pW, pH, padded_matrix, flat_kernel, output);
     
     printf("Starting Parallel Convultion (metrics)\n");
-    double parallel_performance_with_metrics = perform_convulution_metrics(max_threads, W, H, kW, kH, pW, pH, thread_iterations, thread_start_index, padded_matrix, flat_kernel, output, thread_times);
 
-    double parallel_overhead = parallel_performance_time - (sequential_time/max_threads);
-    double metric_overhead = parallel_performance_with_metrics - parallel_performance_time;
+    // double parallel_performance_with_metrics = perform_convulution_metrics(max_threads, W, H, kW, kH, pW, pH, thread_iterations, thread_start_index, padded_matrix, flat_kernel, output, thread_times);
+    double best_performance_result = get_parallel_metrics_per_thread(max_threads, W, H, kW, kH, pW, pH, padded_matrix, flat_kernel, output);    double parallel_overhead = parallel_performance_time - (sequential_time/max_threads);
+    // double metric_overhead = parallel_performance_with_metrics - parallel_performance_time;
 
     fprintf(fptr, "**Results**\n");
     fprintf(fptr, "Sequential Time: %fs\n", sequential_time);
     fprintf(fptr, "Parallel Time (Performance): %f\n", parallel_performance_time);
     fprintf(fptr, "Parallel Time (with metric calculations): %f\n", parallel_overhead);
     fprintf(fptr, "\nParallel Overhead (not considering variance): %f\n", parallel_overhead); // TODO: calculate average overhead
-    fprintf(fptr, "Metric Overhead (not considering variance): %f\n", metric_overhead); // TODO: calculate average overhead
+
+    // fprintf(fptr, "Metric Overhead (not considering variance): %f\n", metric_overhead); // TODO: calculate average overhead
 
     
     free(flat_kernel);
@@ -539,7 +572,7 @@ void conv2d(
 
 int main(int argc, char **argv) {
 
-    int W = 1024, H = 1024, kW = 90, kH = 90, is_random = 1;
+    int W = 10, H = 10, kW = 3, kH = 3, is_random = 1;
 
     const char *infile = NULL, *kinfile = NULL, *outfile = NULL;
 
