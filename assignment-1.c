@@ -269,7 +269,7 @@ void write_metrics(int thread_num, int kW, int kH, double total_time, int* threa
 
     // Print Per Thread FLOPS
     double total_ops = 0;
-    printf("\nThread FLOPS distribution:\n");
+    fprintf(fptr, "\nThread FLOPS distribution:\n");
     for (int t = 0; t < thread_num; t++) {
         int thread_ops = thread_iterations[t*64]*2*kW*kH;
         fprintf(fptr, "Thread %d: %f FLOPS\n", t, (thread_ops/thread_times[t*64]));
@@ -285,7 +285,7 @@ double get_parallel_metrics_per_thread(int max_threads, int W, int H, int kW, in
     double best_performance = 0.0;
     int best_threads = 0;
 
-    for (int i=2; i<=max_threads/2; i=i+2) {
+    for (int i=1; i<=max_threads; i*=2) {
         printf("Performing Function for %d threads\n", i);
 
         float* thread_times = calloc(max_threads*64, sizeof(float)); 
@@ -303,6 +303,22 @@ double get_parallel_metrics_per_thread(int max_threads, int W, int H, int kW, in
         free(thread_iterations);
         free(thread_start_index);
     }
+
+    float* thread_times = calloc(max_threads*64, sizeof(float)); 
+    int* thread_iterations = calloc(max_threads*64, sizeof(int));
+    int* thread_start_index = calloc(max_threads*64, sizeof(int));
+
+    printf("Performing Function for %d threads\n", max_threads);
+    double parallel_performance_with_metrics = perform_convulution_metrics(max_threads, W, H, kW, kH, pW, pH, thread_iterations, thread_start_index, padded_matrix, flat_kernel, output, thread_times);
+    
+    if (best_performance < parallel_performance_with_metrics) {
+        best_performance = parallel_performance_with_metrics;
+        best_threads = max_threads;
+    }
+    write_metrics(max_threads, kW, kH, parallel_performance_with_metrics, thread_start_index, thread_iterations, thread_times);
+    free(thread_times);
+    free(thread_iterations);        
+    free(thread_start_index);
 
     return best_performance;
 }
@@ -393,7 +409,6 @@ double perform_convulution_metrics(int num_threads, int W, int H, int kW, int kH
                     is_first_iteration_j = 0; // reset flag
                     
                 }
-
                 for (int kw=0; kw<kW; kw++) { // iterating through rows of the kernel
                     for (int kh=0; kh<kH; kh++) { // iterating through cols in the kernel 
                         score += (padded_matrix[(i+kw)*(H+pH)+j+kh] * flat_kernel[kw*kH+kh]); // computing the dot product: 2 FLOPS (+, *)
@@ -432,13 +447,55 @@ float perform_convulution_performance(int num_threads, int W, int H, int kW, int
             for (int j=0; j<H; j++) {
                 
                 float score = 0.0; 
+                int current_row = i*H;
 
                 for (int kw=0; kw<kW; kw++) {
+
+                    // pre-computing base indicies
+                    int padded_rowbase = (i+kw)*(H+pH)+j; 
+                    int kernel_rowbase = kw*kH;
+
                     for (int kh=0; kh<kH; kh++) {
-                        score += (padded_matrix[(i+kw)*(H+pH)+j+kh] * flat_kernel[kw*kH+kh]); //2 FLOPS (+&*)
+                        score += (padded_matrix[padded_rowbase+kh] * flat_kernel[kernel_rowbase+kh]); //2 FLOPS (+&*)
                     }
                 }
-                output[i*H+j] = score;        
+                output[current_row+j] = score;        
+            }
+        }
+    }
+    double end = omp_get_wtime();
+    return end-start;
+
+}
+
+float perform_convulution_new_performance(int num_threads, int W, int H, int kW, int kH, int pW, int pH, float* padded_matrix, float* flat_kernel, float* output) {
+    /* Assesing Convultion Without the Overhead of Storing Metrics*/
+
+    omp_set_num_threads(num_threads);
+
+    double start = omp_get_wtime();
+
+    #pragma omp parallel
+    {
+        #pragma omp for schedule(static)
+        for (int i=0; i<W; i++) {
+            
+            for (int j=0; j<H; j++) {
+                
+                float score = 0.0; 
+                int current_row = i*H;
+
+                for (int kw=0; kw<kW; kw++) {
+
+                    // pre-computing base indicies
+                    int padded_rowbase = (i+kw)*(H+pH)+j; 
+                    int kernel_rowbase = kw*kH;
+                    #pragma omp simd reduction(+:score)
+                    for (int kh=0; kh<kH; kh++) {
+                        score += (padded_matrix[padded_rowbase+kh] * flat_kernel[kernel_rowbase+kh]); //2 FLOPS (+&*)
+                    }
+                }
+                output[current_row+j] = score;        
             }
         }
     }
@@ -542,23 +599,28 @@ void conv2d(
     
     fprintf(fptr, "\nEstimated Cache Line Savings of not Adding Padding: %f\n", 1-(matrix_cache_lines_per_thread/padded_matrix_cache_lines_per_thread));
 
-    printf("Starting Sequential Convultion (performance)\n");
-    double sequential_time = perform_convulution_sequntial(W, H, kW, kH, pW, pH, padded_matrix, flat_kernel, output);
+    // printf("Starting Sequential Convultion (performance)\n");
+    // double sequential_time = perform_convulution_sequntial(W, H, kW, kH, pW, pH, padded_matrix, flat_kernel, output);
     
     printf("Starting Parallel Convultion (performance)\n");
     double parallel_performance_time = perform_convulution_performance(max_threads, W, H, kW, kH, pW, pH, padded_matrix, flat_kernel, output);
-    
+    double newp = perform_convulution_new_performance(max_threads, W, H, kW, kH, pW, pH, padded_matrix, flat_kernel, output);
     printf("Starting Parallel Convultion (metrics)\n");
 
     // double parallel_performance_with_metrics = perform_convulution_metrics(max_threads, W, H, kW, kH, pW, pH, thread_iterations, thread_start_index, padded_matrix, flat_kernel, output, thread_times);
-    double best_performance_result = get_parallel_metrics_per_thread(max_threads, W, H, kW, kH, pW, pH, padded_matrix, flat_kernel, output);    double parallel_overhead = parallel_performance_time - (sequential_time/max_threads);
+    // double best_performance_result = get_parallel_metrics_per_thread(max_threads, W, H, kW, kH, pW, pH, padded_matrix, flat_kernel, output);    
+    
+    // double parallel_overhead = parallel_performance_time - (sequential_time/max_threads);
     // double metric_overhead = parallel_performance_with_metrics - parallel_performance_time;
 
     fprintf(fptr, "**Results**\n");
-    fprintf(fptr, "Sequential Time: %fs\n", sequential_time);
+    // fprintf(fptr, "Sequential Time: %fs\n", sequential_time);
     fprintf(fptr, "Parallel Time (Performance): %f\n", parallel_performance_time);
-    fprintf(fptr, "Parallel Time (with metric calculations): %f\n", parallel_overhead);
-    fprintf(fptr, "\nParallel Overhead (not considering variance): %f\n", parallel_overhead); // TODO: calculate average overhead
+    fprintf(fptr, "Parallel NEW Time (Performance): %f\n", newp);
+    fprintf(fptr, "DIFF: %f\n", parallel_performance_time-newp);
+
+    // fprintf(fptr, "Parallel Time (with metric calculations): %f\n", best_performance_result);
+    // fprintf(fptr, "\nParallel Overhead (not considering variance): %f\n", parallel_overhead); // TODO: calculate average overhead
 
     // fprintf(fptr, "Metric Overhead (not considering variance): %f\n", metric_overhead); // TODO: calculate average overhead
 
@@ -572,7 +634,8 @@ void conv2d(
 
 int main(int argc, char **argv) {
 
-    int W = 10, H = 10, kW = 3, kH = 3, is_random = 1;
+    int W = 18, H = 18, kW = 5000, kH = 5000, is_random = 1;
+    // int W = 10, H = 10, kW = 3, kH = 3, is_random = 1;
 
     const char *infile = NULL, *kinfile = NULL, *outfile = NULL;
 
